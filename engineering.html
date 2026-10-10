@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevNotify engineering: architecture, API and known limitations</title>
+<meta name="description" content="How DevNotify is built: the event pipeline stage by stage, implemented behaviour, stack versions, API reference, local setup and known gaps.">
+<meta name="theme-color" content="#F5F3ED">
+<link rel="canonical" href="https://devnotify.tech/engineering.html">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="DevNotify engineering">
+<meta property="og:description" content="Architecture, API reference, local setup and known gaps of the DevNotify backend.">
+<meta property="og:url" content="https://devnotify.tech/engineering.html">
+<meta name="twitter:card" content="summary">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header" id="top"><div class="wrap">
+  <a class="wordmark" href="index.html">DevNotify</a>
+  <nav class="site-nav" aria-label="Primary">
+    <a href="index.html">Product</a><a href="#pipeline">Pipeline</a><a href="#features">Behaviour</a><a href="#engineering">Stack</a><a href="#api">API and setup</a><a href="#status">Status</a>
+    <a class="repo" href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">GitHub</a>
+  </nav>
+</div></header>
+<main id="main">
+<section class="hero"><div class="wrap"><div>
+  <h1>Engineering</h1>
+  <p class="lede">The architecture behind DevNotify, written from the repository README. Source files were not independently inspected, so treat file paths as pointers to check.</p>
+</div></div></section>
+<section class="pipeline dark" id="pipeline" aria-labelledby="pipeline-title">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2 id="pipeline-title">One event, six stages</h2>
+      <p>The asynchronous path from an external system to a delivered notification, as described in the README. Ingestion does not wait on email delivery, so the sender gets its <code>202 Accepted</code> early.</p>
+    </div>
+
+    <div class="overview" aria-hidden="true">
+      <svg viewBox="0 0 960 96" xmlns="http://www.w3.org/2000/svg" focusable="false">
+        <g>
+          <rect class="box" x="1" y="1" width="128" height="62"/><text class="name" x="65" y="30" text-anchor="middle">Ingest</text><text class="tech" x="65" y="50" text-anchor="middle">Spring MVC</text>
+          <rect class="box" x="167" y="1" width="128" height="62"/><text class="name" x="231" y="30" text-anchor="middle">Verify</text><text class="tech" x="231" y="50" text-anchor="middle">HMAC-SHA256</text>
+          <rect class="box" x="333" y="1" width="128" height="62"/><text class="name" x="397" y="30" text-anchor="middle">Persist</text><text class="tech" x="397" y="50" text-anchor="middle">PostgreSQL</text>
+          <rect class="box" x="499" y="1" width="128" height="62"/><text class="name" x="563" y="30" text-anchor="middle">Queue</text><text class="tech" x="563" y="50" text-anchor="middle">RabbitMQ</text>
+          <rect class="box" x="665" y="1" width="128" height="62"/><text class="name" x="729" y="30" text-anchor="middle">Match rules</text><text class="tech" x="729" y="50" text-anchor="middle">Rules, Redis cache</text>
+          <rect class="box last" x="831" y="1" width="128" height="62"/><text class="name" x="895" y="30" text-anchor="middle">Deliver</text><text class="tech" x="895" y="50" text-anchor="middle">Email, WebSocket</text>
+        </g>
+        <g class="arrow">
+          <path d="M131 32h32M158 27l5 5-5 5"/><path d="M297 32h32M324 27l5 5-5 5"/><path d="M463 32h32M490 27l5 5-5 5"/><path d="M629 32h32M656 27l5 5-5 5"/><path d="M795 32h32M822 27l5 5-5 5"/>
+        </g>
+        <text class="tech" x="1" y="88">Synchronous gRPC calls join at the Match rules stage.</text>
+      </svg>
+    </div>
+
+    <ol class="rail">
+      <li>
+        <span class="rail-n" aria-hidden="true">1</span>
+        <div class="body">
+          <h3>Ingest</h3>
+          <p>An external system sends <code>POST /webhooks/{tenantSlug}/ingest</code>. A tenant filter resolves the team from the slug before the request reaches the controller.</p>
+        </div>
+        <p class="tech">Spring MVC filter chain <span>(TenantFilter, JwtAuthFilter, SecurityConfig)</span></p>
+      </li>
+      <li>
+        <span class="rail-n" aria-hidden="true">2</span>
+        <div class="body">
+          <h3>Verify</h3>
+          <p>The sender signs the payload with HMAC-SHA256 using the tenant's API key and puts the hex digest in <code>X-Webhook-Signature</code>. The platform recomputes it and compares in constant time. The secret itself never crosses the network.</p>
+        </div>
+        <p class="tech">HmacUtil <span>with MessageDigest.isEqual</span></p>
+      </li>
+      <li>
+        <span class="rail-n" aria-hidden="true">3</span>
+        <div class="body">
+          <h3>Persist</h3>
+          <p>The raw payload is stored as JSONB in <code>webhook_events</code> with status <code>RECEIVED</code>. This runs in its own bean so the transaction commits before anything is published.</p>
+        </div>
+        <p class="tech">PostgreSQL 16, Flyway <span>(WebhookPersistenceService)</span></p>
+      </li>
+      <li>
+        <span class="rail-n" aria-hidden="true">4</span>
+        <div class="body">
+          <h3>Queue</h3>
+          <p>The event is published to RabbitMQ on <code>devnotify.events</code>. Messages that fail processing go to a dead letter queue, where they stay available for inspection instead of being retried forever.</p>
+        </div>
+        <p class="tech">RabbitMQ 3.13 <span>(NotificationProducer, dead letter queue)</span></p>
+      </li>
+      <li>
+        <span class="rail-n" aria-hidden="true">5</span>
+        <div class="body">
+          <h3>Match rules</h3>
+          <p>A consumer hands the event to <code>NotificationProcessingService</code>. Rules match on optional event type and source, where an empty field means catch-all. Matching rules produce notification records. Active rules are cached in Redis and evicted whenever a rule changes.</p>
+        </div>
+        <p class="tech">NotificationConsumer <span>(thin adapter)</span><br>Redis 7, CachedRule DTO</p>
+      </li>
+      <li>
+        <span class="rail-n" aria-hidden="true">6</span>
+        <div class="body">
+          <h3>Deliver</h3>
+          <p>Each notification fans out to its rule's channels. Email is sent asynchronously so SMTP latency never blocks the queue. WebSocket push goes to the individual member and to a tenant-wide topic. Notifications are also indexed for full-text search, and every delivery attempt is recorded as <code>PENDING</code>, <code>SENT</code> or <code>FAILED</code>.</p>
+        </div>
+        <p class="tech">EmailService <span>(Mailtrap sandbox in the documented setup)</span><br>Spring STOMP and SockJS<br>Elasticsearch 8.15</p>
+      </li>
+    </ol>
+
+    <div class="sync">
+      <h3>The synchronous door into stage 5</h3>
+      <p>A gRPC server on port 9090 exposes <code>NotificationProcessor.ProcessWebhookEvent</code>. It calls the same <code>NotificationProcessingService</code> as the queue consumer, so there is one definition of what processing an event means.</p>
+      <p>It exists for cases that need an immediate result, such as testing a rule now. Today everything runs in one process, so the contract and client/server pair work, but independent scaling of a split service does not exist yet.</p>
+    </div>
+
+    <dl class="stores">
+      <div><dt>PostgreSQL</dt><dd>Tenants, members, webhook events, rules, notifications and delivery records. Schema lives in five Flyway migrations.</dd></div>
+      <div><dt>RabbitMQ</dt><dd>Decouples ingestion from processing and holds failed messages in a dead letter queue.</dd></div>
+      <div><dt>Redis</dt><dd>Cache-aside for tenants, invalidate-on-write for notification rules.</dd></div>
+      <div><dt>Elasticsearch</dt><dd>Full-text search over notification history.</dd></div>
+    </dl>
+  </div>
+</section><section class="features" id="features" aria-labelledby="features-title">
+  <div class="wrap">
+    <div class="intro">
+      <h2 id="features-title">What is implemented</h2>
+      <p>Seven behaviours from the README, each with the reasoning the repository gives for it.</p>
+    </div>
+    <div>
+      <article class="feat major">
+        <h3>Commit first, then publish</h3>
+        <p><code>WebhookPersistenceService</code> is a separate bean from the code that publishes to RabbitMQ. The database transaction commits before the message goes out.</p>
+        <p class="why">Spring applies <code>@Transactional</code> through a bean's proxy, so a call within the same class bypasses it. Splitting the bean means a queued message cannot point at a row that was never committed.</p>
+      </article>
+      <article class="feat">
+        <h3>Signed ingestion</h3>
+        <p>Webhooks are authenticated with HMAC-SHA256 over the payload, keyed by the tenant's API key, and checked with a constant-time comparison.</p>
+        <p class="why">The shared secret is never sent, and the comparison takes the same time wherever the signatures differ.</p>
+      </article>
+      <article class="feat">
+        <h3>Rules per tenant</h3>
+        <p>A rule names an optional event type, an optional source, and a list of channels, <code>EMAIL</code> or <code>WEBSOCKET</code>. Leaving type and source empty creates a catch-all.</p>
+        <p class="why">A team changes what it hears about through the REST API instead of redeploying.</p>
+      </article>
+      <article class="feat">
+        <h3>Deliveries you can audit</h3>
+        <p>Every notification has one delivery row per channel, with status, attempt time, delivery time and a failure reason.</p>
+        <p class="why">When an email does not arrive, the record shows whether it was attempted and why it failed.</p>
+      </article>
+      <article class="feat">
+        <h3>Two caching strategies, chosen on purpose</h3>
+        <p>Tenants use cache-aside. Notification rules use invalidate-on-write. Rules are cached as a flat <code>CachedRule</code> DTO rather than as JPA entities.</p>
+        <p class="why">A stale tenant corrects itself after one slow read. A stale rule would silently misroute notifications for minutes. Caching entities directly hit a real serialization bug with lazy-loaded proxies, which the DTO avoids.</p>
+      </article>
+      <article class="feat">
+        <h3>Searchable history</h3>
+        <p><code>GET /api/v1/tenants/{slug}/notifications/search?q=</code> runs a full-text query against Elasticsearch.</p>
+        <p class="why">Past notifications can be found by their content, from the same API that creates them.</p>
+      </article>
+      <article class="feat">
+        <h3>A synchronous path beside the async one</h3>
+        <p>gRPC and Protocol Buffers define a <code>ProcessWebhookEvent</code> call that reuses the queue consumer's business logic.</p>
+        <p class="why">Ingestion stays asynchronous so senders never wait on email. gRPC serves callers that want the result immediately.</p>
+      </article>
+    </div>
+  </div>
+</section><section class="eng" id="engineering" aria-labelledby="eng-title">
+  <div class="wrap">
+    <h2 id="eng-title">Engineering details</h2>
+    <div class="eng-grid">
+      <div>
+        <h3>Stack</h3>
+        <dl class="stack">
+          <div><dt>Language</dt><dd>Java 21 target. The README also notes JDK 25 builds.</dd></div>
+          <div><dt>Framework</dt><dd>Spring Boot 3.4.5, modular monolith, package by feature</dd></div>
+          <div><dt>Persistence</dt><dd>Hibernate 6.6.13, hypersistence-utils 3.9.0 for JSONB, PostgreSQL 16, Flyway 10.20.1</dd></div>
+          <div><dt>Messaging</dt><dd>RabbitMQ 3.13.7</dd></div>
+          <div><dt>Cache and search</dt><dd>Redis 7, Elasticsearch 8.15.0</dd></div>
+          <div><dt>RPC</dt><dd>gRPC and Protocol Buffers 1.68.1</dd></div>
+          <div><dt>Real time</dt><dd>Spring STOMP and SockJS, JWT passed on the handshake</dd></div>
+          <div><dt>Auth</dt><dd>JJWT 0.12.5 with 24 hour tokens, BCrypt at cost 10</dd></div>
+          <div><dt>Build</dt><dd>Gradle 8 with Kotlin DSL, Docker for infrastructure</dd></div>
+        </dl>
+      </div>
+      <div>
+        <h3>Where to read the code</h3>
+        <ul class="files">
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/blob/main/README.md">README.md</a><span>Architecture, schema, API reference, design decisions and known gaps.</span></li>
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/blob/main/src/main/java/com/devnotify/platform/common/security/HmacUtil.java">common/security/HmacUtil.java</a><span>Signature computation and comparison.</span></li>
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/blob/main/src/main/java/com/devnotify/platform/webhook/WebhookPersistenceService.java">webhook/WebhookPersistenceService.java</a><span>The commit-before-publish boundary.</span></li>
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/blob/main/src/main/java/com/devnotify/platform/notification/NotificationProcessingService.java">notification/NotificationProcessingService.java</a><span>Rule matching shared by the queue and gRPC.</span></li>
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/blob/main/src/main/proto/notification.proto">proto/notification.proto</a><span>The gRPC service contract.</span></li>
+          <li><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/tree/main/src/main/resources/db/migration">db/migration</a><span>Migrations V1 to V5.</span></li>
+        </ul>
+        <p class="files-note">Paths follow the project structure listed in the README.</p>
+      </div>
+    </div>
+
+    <div class="decisions">
+      <div><h3>Flyway, not Hibernate DDL</h3><p>The schema is version-controlled SQL. Hibernate validates it at startup and never generates it.</p></div>
+      <div><h3>JSONB for payloads</h3><p>Webhook bodies are stored as received and interpreted downstream according to their source.</p></div>
+      <div><h3>Tokens and sockets</h3><p>JWT validation is signature-only, with no database round trip. Browsers cannot set headers on WebSocket connections, so the token travels as a query parameter and is checked in the handshake interceptor.</p></div>
+    </div>
+  </div>
+</section><section class="status" id="api" aria-labelledby="api-title"><div class="wrap">
+<h2 id="api-title">API reference and local setup</h2>
+<div class="eng-grid">
+<div><h3>Endpoints</h3><dl class="stack">
+<div><dt>Webhooks</dt><dd><code>POST /webhooks/{tenantSlug}/ingest</code> (HMAC signature, plus <code>X-Event-Type</code> and <code>X-Event-Source</code> headers). <code>GET /webhooks/{tenantSlug}/events</code></dd></div>
+<div><dt>Auth</dt><dd><code>POST /api/v1/auth/register</code>, <code>POST /api/v1/auth/login</code> (returns a JWT)</dd></div>
+<div><dt>Tenants</dt><dd><code>POST</code> and <code>GET /api/v1/tenants</code>, <code>GET /api/v1/tenants/{slug}</code> (cached), <code>PATCH /api/v1/tenants/{id}/suspend</code> (evicts cache)</dd></div>
+<div><dt>Rules</dt><dd><code>POST</code> and <code>GET /api/v1/tenants/{slug}/rules</code>, <code>DELETE .../rules/{ruleId}</code> deactivates</dd></div>
+<div><dt>Search</dt><dd><code>GET /api/v1/tenants/{slug}/notifications/search?q=</code></dd></div>
+<div><dt>WebSocket</dt><dd><code>ws://localhost:8080/ws?token=&lt;jwt&gt;</code>, subscribe to <code>/user/queue/notifications</code> or <code>/topic/tenant/{tenantSlug}</code></dd></div>
+<div><dt>gRPC</dt><dd><code>NotificationProcessor.ProcessWebhookEvent</code> on port 9090. Manual test: <code>POST /api/v1/grpc-test/process/{webhookEventId}</code></dd></div>
+</dl></div>
+<div><h3>Run it locally</h3>
+<p>Requires Java 21+, Docker and Postman. Start the four services, fill in the gitignored <code>application.yml</code> (JWT secret, Mailtrap credentials, Redis, Elasticsearch and gRPC settings), then build and run.</p>
+<pre class="setup"><code>docker run --name devnotify-postgres -e POSTGRES_DB=devnotify -e POSTGRES_USER=devnotify -e POSTGRES_PASSWORD=devnotify -p 5432:5432 -d postgres:16
+docker run --name devnotify-rabbitmq -e RABBITMQ_DEFAULT_USER=guest -e RABBITMQ_DEFAULT_PASS=guest -p 5672:5672 -p 15672:15672 -d rabbitmq:3-management
+docker run --name devnotify-redis -p 6379:6379 -d redis:7-alpine
+docker run --name devnotify-elasticsearch -e discovery.type=single-node -e xpack.security.enabled=false -p 9200:9200 -d docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+
+./gradlew clean build -x test
+./gradlew bootRun</code></pre>
+<p>The README then walks through a ten step end-to-end test: create a tenant, register a member, create a rule, connect a WebSocket, sign and send a webhook, and check the browser, Mailtrap inbox, search and gRPC re-processing. A local Redis on port 6379 can shadow the container, so check <code>docker ps</code>.</p>
+<p><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform#readme">Full setup in the README</a></p></div>
+</div></div></section>
+<section class="status" id="status" aria-labelledby="status-title">
+  <div class="wrap">
+    <h2 id="status-title">Status: built in five phases, still a single-process project</h2>
+    <p class="lead">The README marks all five build phases complete. It also lists gaps, and a few more follow from its API reference. There is no hosted service, no published benchmark and no commercial offering.</p>
+
+    <ol class="phases">
+      <li><strong>Foundation</strong><span>Multi-tenancy, JWT auth, HMAC ingestion</span></li>
+      <li><strong>Processing</strong><span>RabbitMQ consumer, rules, email</span></li>
+      <li><strong>Real time</strong><span>STOMP WebSocket push and broadcast</span></li>
+      <li><strong>Observability</strong><span>Redis caching, Elasticsearch search</span></li>
+      <li><strong>gRPC</strong><span>Synchronous processing contract</span></li>
+    </ol>
+
+    <div class="gaps-grid">
+      <h3>Known gaps</h3>
+      <ul class="gaps">
+        <li><strong>Cache invalidation window</strong><span>If a write succeeds and the app crashes before eviction, stale data is served until the TTL expires, 5 to 10 minutes depending on the cache.</span></li>
+        <li><strong>In-memory WebSocket sessions</strong><span>The session registry works for one instance. Multiple instances behind a load balancer would need a shared store such as Redis.</span></li>
+        <li><strong>gRPC is rehearsal for now</strong><span>Everything is one deployable, so independent scaling and deployment of a split service are not realized.</span></li>
+        <li><strong>No JWT revocation</strong><span>A suspended member's token stays valid until it expires, up to 24 hours.</span></li>
+        <li><strong>Unauthenticated management routes</strong><span>The README's API reference lists tenant, rule, search and event-listing endpoints with no authentication. Only webhook ingestion (HMAC) and the WebSocket (JWT) are shown as protected.</span></li>
+      </ul>
+    </div>
+
+    </div>
+</section></main>
+<footer class="site-footer"><div class="wrap">
+<p><strong>DevNotify</strong> is an open source project in development.</p>
+<nav aria-label="Footer"><a href="index.html">Product</a><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">Repository</a><a href="#top">Back to top</a></nav>
+</div></footer>
+</body></html>
