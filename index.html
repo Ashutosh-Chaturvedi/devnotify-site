@@ -4,15 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DevNotify: a notification pipeline for the events your software produces</title>
-<meta name="description" content="DevNotify is an open source notification pipeline in development. It accepts signed events, processes them asynchronously, applies per-team rules, delivers by email and WebSocket and keeps a searchable record.">
+<meta name="description" content="DevNotify is an early-stage product: an open source notification pipeline. It accepts signed events, processes them asynchronously, applies per-team rules, delivers by email and WebSocket and keeps a searchable record.">
 <meta name="theme-color" content="#F5F3ED">
 <link rel="canonical" href="https://devnotify.tech/">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="DevNotify">
-<meta property="og:description" content="A notification pipeline for the events your software produces. Open source, in development.">
+<meta property="og:description" content="Webhooks in, routed notifications out, with a record of every delivery. An early-stage product, built in the open.">
 <meta property="og:url" content="https://devnotify.tech/">
 <meta name="twitter:card" content="summary">
+<script>if(!(window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches))document.documentElement.classList.add("js");</script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,7 +21,7 @@
 <header class="site-header"><div class="wrap">
   <a class="wordmark" href="#top" id="top">DevNotify</a>
   <nav class="site-nav" aria-label="Primary">
-    <a href="#product">Product</a><a href="#how">How it works</a><a href="engineering.html">Engineering</a>
+    <a href="#product">Product</a><a href="#workflow">Workflow</a><a href="#how">Architecture</a><a href="engineering.html">Engineering</a>
     <a class="repo" href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">GitHub</a>
   </nav>
 </div></header>
@@ -29,12 +30,12 @@
 <section class="hero" aria-labelledby="hero-title"><div class="wrap">
   <div>
     <h1 class="long" id="hero-title">Webhooks in, routed notifications out, with a record of every delivery.</h1>
-    <p class="lede">DevNotify is an open source notification pipeline in development. It accepts signed events from the tools a team already uses, processes them outside the request, applies that team's rules, and delivers by email and WebSocket. Every delivery attempt is stored and searchable.</p>
+    <p class="lede">DevNotify is being built so a team can point its CI, version control and monitoring tools at one endpoint, say who should hear about what, and see afterwards what was delivered. It handles signature checks, queuing, routing and delivery records, so each application does not rebuild them.</p>
     <div class="actions">
-      <a class="btn" href="#how">Explore how it works</a>
+      <a class="btn" href="#workflow">See how it works</a>
       <a class="textlink" href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">View the source code</a>
     </div>
-    <p class="hero-note">Early stage. The backend is implemented and runs locally. There is no hosted service yet.</p>
+    <p class="hero-note">An early-stage product, built in the open. The backend is implemented and runs locally. A hosted version is the goal and does not exist yet.</p>
   </div>
   <figure class="ledger">
     <dl>
@@ -62,9 +63,52 @@
   </dl>
 </div></section>
 
+<section class="workflow" id="workflow" aria-labelledby="wf-title"><div class="wrap">
+  <div class="sec-head">
+    <h2 id="wf-title">One failed deploy, from event to delivery record</h2>
+    <p>An illustrative scenario assembled from capabilities in the README. It is not connected to a running service and shows no real data.</p>
+  </div>
+  <ol class="flow">
+    <li><h3>Your CI sends an event</h3>
+      <p>After a failed deployment, the pipeline posts a signed webhook to the team's ingest URL, labelled with an event type and a source.</p>
+      <pre><code>POST /webhooks/acme/ingest
+X-Event-Type: deploy_failed
+X-Event-Source: jenkins</code></pre></li>
+    <li><h3>You configured one rule</h3>
+      <p>Created once through the API. Event type and source decide the match. Channels decide where it goes.</p>
+      <pre><code>{"name": "Notify on deploy failure",
+ "eventType": "deploy_failed",
+ "source": "jenkins",
+ "channels": ["EMAIL", "WEBSOCKET"]}</code></pre></li>
+    <li><h3>DevNotify processes it</h3>
+      <p>It checks the signature, stores the event, queues it and answers the sender. A consumer then matches the rule and creates the notification.</p></li>
+    <li><h3>You can see the outcome</h3>
+      <p>The email goes out and the WebSocket message reaches connected members. Each delivery is recorded as SENT or FAILED, and the notification can be found later by text search.</p></li>
+  </ol>
+  <div class="try" id="try">
+    <h3>Try the rule matching</h3>
+    <p class="note">Three example rules, evaluated in your browser. A rule with no event type or source matches anything. Matching here is exact and case-sensitive, so check the source for production behaviour. Nothing is sent anywhere.</p>
+    <div class="try-grid">
+      <div class="try-in">
+        <label for="evt">Event type</label>
+        <input id="evt" list="evts" value="deploy_failed" autocomplete="off" spellcheck="false">
+        <datalist id="evts"><option value="deploy_failed"><option value="push"><option value="pull_request"></datalist>
+        <label for="src">Source</label>
+        <input id="src" list="srcs" value="jenkins" autocomplete="off" spellcheck="false">
+        <datalist id="srcs"><option value="jenkins"><option value="github"></datalist>
+      </div>
+      <div>
+        <ol class="try-rules" id="rules" aria-live="polite"></ol>
+        <p class="try-sum" id="trysum"></p>
+        <noscript><p class="note">This example needs JavaScript.</p></noscript>
+      </div>
+    </div>
+  </div>
+</div></section>
+
 <section class="pipeline dark" id="how" aria-labelledby="how-title"><div class="wrap">
   <div class="sec-head">
-    <h2 id="how-title">From external event to delivered notification</h2>
+    <h2 id="how-title">The architecture behind that sequence</h2>
     <p>Five stages, each a separate responsibility. The sender's request ends at the queue, and everything to the right of it runs asynchronously.</p>
   </div>
   <div class="overview" aria-hidden="true">
@@ -80,6 +124,7 @@
         <g class="arrow">
           <path d="M131 32h32M158 27l5 5-5 5"/><path d="M297 32h32M324 27l5 5-5 5"/><path d="M463 32h32M490 27l5 5-5 5"/><path d="M629 32h32M656 27l5 5-5 5"/><path d="M795 32h32M822 27l5 5-5 5"/>
         </g>
+        <circle class="packet" cx="2" cy="32" r="4.5"/>
         <text class="tech" x="1" y="88">Synchronous gRPC calls join at the Match rules stage.</text>
       </svg>
     </div>
@@ -134,26 +179,72 @@
 </div></section>
 
 <section class="status" id="status" aria-labelledby="status-title"><div class="wrap">
-  <h2 id="status-title">Where the project stands</h2>
-  <p class="lead">The backend is implemented and documented, and it runs on a developer machine with Docker. There is no hosted service and no commercial offering. The current backend should not be deployed for real users yet, because authorization on its management endpoints still needs work.</p>
-  <h3>Directions under consideration, none implemented</h3>
-  <ul class="dir">
-    <li><strong>Simpler integration.</strong> Fewer steps from a new tenant to a first delivered notification.</li>
-    <li><strong>Delivery diagnostics.</strong> Clearer visibility into why a delivery failed or an event was not matched.</li>
-    <li><strong>Security and authorization.</strong> Authenticated management routes and token revocation.</li>
-    <li><strong>Deployment options.</strong> Exploring how and whether to host it.</li>
-  </ul>
+  <h2 id="status-title">Where DevNotify stands, and where it is going</h2>
+  <p class="lead">DevNotify is an early-stage product. The backend is implemented and documented, and it runs on a developer machine with Docker. The goal is a hosted version that teams can use without running the infrastructure themselves. That version does not exist yet, and the current backend should not be deployed for real users until authorization on its management endpoints is addressed.</p>
+  <ol class="phases three">
+    <li class="built"><strong>Built</strong><span>Signed ingestion, queueing, per-tenant rules, email and WebSocket delivery, searchable history and a gRPC interface, in a local setup.</span></li>
+    <li class="next"><strong>Next</strong><span>Authenticated management routes, simpler first-run setup and clearer delivery diagnostics.</span></li>
+    <li class="later"><strong>Later goal</strong><span>A hosted version, once the security work is done. Not started, and not promised on a date.</span></li>
+  </ol>
+  <h3>Who is building it</h3>
+  <p class="founder">DevNotify is designed and built by Ashutosh Chaturvedi. The commit history and architecture notes are public, so progress can be checked rather than taken on trust. <a href="https://ashutoshchaturvedi.me">Portfolio</a> and <a href="https://github.com/Ashutosh-Chaturvedi">GitHub profile</a>. Contact: <a href="mailto:contact@devnotify.tech">contact@devnotify.tech</a>.</p>
   <div class="close">
-    <p class="big">Read the code, follow the build.</p>
+    <p class="big">Follow the build, or say what you would use it for.</p>
     <div class="actions">
       <a class="btn" href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">Open the repository</a>
+      <a class="textlink" href="mailto:contact@devnotify.tech">Email contact@devnotify.tech</a>
+      <a class="textlink" href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform/issues">Open an issue</a>
       <a class="textlink" href="engineering.html">Read the architecture</a>
     </div>
+    <p class="small">There is no signup or waitlist. To say what you would use it for, ask a question or discuss the product, email the address above. Public feedback fits better as an issue on the repository.</p>
   </div>
 </div></section>
 </main>
 <footer class="site-footer"><div class="wrap">
-  <p><strong>DevNotify</strong> is an open source project in development.</p>
-  <nav aria-label="Footer"><a href="#product">Product</a><a href="#how">How it works</a><a href="engineering.html">Engineering</a><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">Repository</a></nav>
+  <p><strong>DevNotify</strong> is an early-stage product, built in the open.</p>
+  <nav aria-label="Footer"><a href="#product">Product</a><a href="#how">How it works</a><a href="engineering.html">Engineering</a><a href="https://github.com/Ashutosh-Chaturvedi/developer-notification-platform">Repository</a><a href="mailto:contact@devnotify.tech">contact@devnotify.tech</a></nav>
 </div></footer>
+<script>
+(function(){
+  var RULES=[
+    {n:"Notify on deploy failure",t:"deploy_failed",s:"jenkins",c:["EMAIL","WEBSOCKET"]},
+    {n:"Any GitHub event",t:null,s:"github",c:["WEBSOCKET"]},
+    {n:"Catch-all",t:null,s:null,c:["EMAIL"]}
+  ];
+  var evt=document.getElementById("evt"),src=document.getElementById("src"),
+      list=document.getElementById("rules"),sum=document.getElementById("trysum");
+  if(!evt||!src||!list||!sum)return;
+  function run(){
+    var t=evt.value.trim(),s=src.value.trim(),hits=0,ch=[];
+    list.textContent="";
+    RULES.forEach(function(r){
+      var m=(r.t===null||r.t===t)&&(r.s===null||r.s===s);
+      if(m){hits++;r.c.forEach(function(c){if(ch.indexOf(c)<0)ch.push(c);});}
+      var li=document.createElement("li");li.className=m?"hit":"miss";
+      var a=document.createElement("strong");a.textContent=r.n;
+      var b=document.createElement("span");b.textContent="type "+(r.t||"any")+", source "+(r.s||"any");
+      var c=document.createElement("b");c.textContent=m?"Matches. Channels: "+r.c.join(", "):"No match";
+      li.appendChild(a);li.appendChild(b);li.appendChild(c);list.appendChild(li);
+    });
+    sum.textContent=hits?hits+" of "+RULES.length+" rules match. Channels used: "+ch.join(", ")+".":"No rule matches, so no notification is created.";
+  }
+  evt.addEventListener("input",run);src.addEventListener("input",run);run();
+})();
+</script>
+<script>
+(function(){
+  var root=document.documentElement;
+  if(!root.classList.contains("js"))return;
+  if(!("IntersectionObserver" in window)){root.classList.remove("js");return;}
+  document.querySelectorAll(".ledger dl div").forEach(function(d,i){d.style.setProperty("--i",i);});
+  var sel=".problem .wrap>*,.resp div,.workflow .sec-head,.flow li,.try,.pipeline .sec-head,.decisions>div,.feat,.who .wrap>*,.who li,.craft .wrap>*,.status .wrap>*,.phases li";
+  var els=[].slice.call(document.querySelectorAll(sel));
+  var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add("in");io.unobserve(e.target);}});},{threshold:.1,rootMargin:"0px 0px -5% 0px"});
+  els.forEach(function(el){
+    var i=[].indexOf.call(el.parentNode.children,el);
+    el.classList.add("reveal");el.style.transitionDelay=Math.min(i,5)*80+"ms";io.observe(el);
+  });
+  setTimeout(function(){els.forEach(function(el){el.classList.add("in");});},6000);
+})();
+</script>
 </body></html>
